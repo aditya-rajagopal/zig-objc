@@ -152,19 +152,24 @@ pub fn Block(
         fn FnType(comptime ContextArg: type) type {
             var params: [Args.len + 1]std.builtin.Type.Fn.Param = undefined;
             params[0] = .{ .is_generic = false, .is_noalias = false, .type = *const ContextArg };
+            var param_types: [Args.len + 1]type = undefined;
+            var param_attrs: [Args.len + 1]std.builtin.Type.Fn.Param.Attributes = undefined;
+            param_types[0] = *const ContextArg;
+            param_attrs[0] = .{ .@"noalias" = false };
             for (Args, 1..) |Arg, i| {
+                param_types[i] = Arg;
+                param_attrs[i] = .{ .@"noalias" = false };
                 params[i] = .{ .is_generic = false, .is_noalias = false, .type = Arg };
             }
 
-            return @Type(.{
-                .@"fn" = .{
-                    .calling_convention = .c,
-                    .is_generic = false,
-                    .is_var_args = false,
-                    .return_type = Return,
-                    .params = &params,
+            return @Fn(
+                &param_types,
+                &param_attrs,
+                Return,
+                .{
+                    .@"callconv" = .c,
                 },
-            });
+            );
         }
     };
 }
@@ -173,42 +178,29 @@ pub fn Block(
 /// argument to any block invocation. See Block.
 fn BlockContext(comptime Captures: type, comptime InvokeFn: type) type {
     const captures_info = @typeInfo(Captures).@"struct";
-    var fields: [captures_info.fields.len + 5]std.builtin.Type.StructField = undefined;
-    fields[0] = .{
-        .name = "isa",
-        .type = ?*anyopaque,
-        .default_value_ptr = null,
-        .is_comptime = false,
-        .alignment = @alignOf(*anyopaque),
-    };
-    fields[1] = .{
-        .name = "flags",
-        .type = BlockFlags,
-        .default_value_ptr = null,
-        .is_comptime = false,
-        .alignment = @alignOf(c_int),
-    };
-    fields[2] = .{
-        .name = "reserved",
-        .type = c_int,
-        .default_value_ptr = null,
-        .is_comptime = false,
-        .alignment = @alignOf(c_int),
-    };
-    fields[3] = .{
-        .name = "invoke",
-        .type = *const InvokeFn,
-        .default_value_ptr = null,
-        .is_comptime = false,
-        .alignment = @typeInfo(*const InvokeFn).pointer.alignment,
-    };
-    fields[4] = .{
-        .name = "descriptor",
-        .type = *const Descriptor,
-        .default_value_ptr = null,
-        .is_comptime = false,
-        .alignment = @alignOf(*Descriptor),
-    };
+    var field_names: [captures_info.fields.len + 5][]const u8 = undefined;
+    var field_types: [captures_info.fields.len + 5]type = undefined;
+    var field_attrs: [captures_info.fields.len + 5]std.builtin.Type.StructField.Attributes = undefined;
+
+    field_names[0] = "isa";
+    field_types[0] = ?*anyopaque;
+    field_attrs[0] = .{ .@"align" = @alignOf(*anyopaque), .@"comptime" = false, .default_value_ptr = null };
+
+    field_names[1] = "flags";
+    field_types[1] = BlockFlags;
+    field_attrs[1] = .{ .@"align" = @alignOf(c_int), .@"comptime" = false, .default_value_ptr = null };
+
+    field_names[2] = "reserved";
+    field_types[2] = c_int;
+    field_attrs[2] = .{ .@"align" = @alignOf(c_int), .@"comptime" = false, .default_value_ptr = null };
+
+    field_names[3] = "invoke";
+    field_types[3] = *const InvokeFn;
+    field_attrs[3] = .{ .@"align" = @typeInfo(*const InvokeFn).pointer.alignment, .@"comptime" = false, .default_value_ptr = null };
+
+    field_names[4] = "descriptor";
+    field_types[4] = *const Descriptor;
+    field_attrs[4] = .{ .@"align" = @alignOf(*Descriptor), .@"comptime" = false, .default_value_ptr = null };
 
     for (captures_info.fields, 5..) |capture, i| {
         switch (capture.type) {
@@ -217,23 +209,12 @@ fn BlockContext(comptime Captures: type, comptime InvokeFn: type) type {
             else => {},
         }
 
-        fields[i] = .{
-            .name = capture.name,
-            .type = capture.type,
-            .default_value_ptr = null,
-            .is_comptime = false,
-            .alignment = capture.alignment,
-        };
+        field_names[i] = capture.name;
+        field_types[i] = capture.type;
+        field_attrs[i] = .{ .@"align" = capture.alignment, .@"comptime" = false, .default_value_ptr = null };
     }
 
-    return @Type(.{
-        .@"struct" = .{
-            .layout = .@"extern",
-            .fields = &fields,
-            .decls = &.{},
-            .is_tuple = false,
-        },
-    });
+    return @Struct(.@"extern", null, &field_names, &field_types, &field_attrs);
 }
 
 // Pointer to opaque instead of anyopaque: https://github.com/ziglang/zig/issues/18461

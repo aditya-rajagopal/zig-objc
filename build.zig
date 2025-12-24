@@ -26,15 +26,18 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
         }),
     });
-    tests.linkSystemLibrary("objc");
-    tests.linkFramework("Foundation");
-    tests.linkFramework("AppKit"); // Required by 'tagged pointer' test.
+    tests.root_module.linkSystemLibrary("objc", .{});
+    tests.root_module.linkFramework("Foundation", .{});
+    tests.root_module.linkFramework("AppKit", .{}); // Required by 'tagged pointer' test.
     try addAppleSDK(b, tests.root_module);
     b.installArtifact(tests);
 
     const test_step = b.step("test", "Run tests");
     const tests_run = b.addRunArtifact(tests);
     test_step.dependOn(&tests_run.step);
+
+    const check_step = b.step("check", "Check the code");
+    check_step.dependOn(&tests.step);
 }
 
 /// Add the SDK framework, include, and library paths to the given module.

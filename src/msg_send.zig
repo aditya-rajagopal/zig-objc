@@ -65,7 +65,7 @@ pub fn MsgSend(comptime T: type) type {
             const msg_send_ptr: *const Fn = @ptrCast(msg_send_fn);
             var super: c.objc_super = .{
                 .receiver = target.value,
-                .class = superclass.value,
+                .super_class = superclass.value,
             };
             const result = @call(.auto, msg_send_ptr, .{ &super, sel.value } ++ args);
 
@@ -183,34 +183,26 @@ fn MsgSendFn(
 
     // Build up our argument types.
     const Fn = std.builtin.Type.Fn;
-    const params: []Fn.Param = params: {
-        var acc: [argsInfo.fields.len + 2]Fn.Param = undefined;
+    const types: []const type, const attrs: *const [argsInfo.fields.len + 2]Fn.Param.Attributes = params: {
+        var types: [argsInfo.fields.len + 2]type = undefined;
+        var attrs: [argsInfo.fields.len + 2]Fn.Param.Attributes = undefined;
 
-        // First argument is always the target and selector.
-        acc[0] = .{ .type = Target, .is_generic = false, .is_noalias = false };
-        acc[1] = .{ .type = c.SEL, .is_generic = false, .is_noalias = false };
+        types[0] = Target;
+        attrs[0] = .{ .@"noalias" = false };
+
+        types[1] = c.SEL;
+        attrs[1] = .{ .@"noalias" = false };
 
         // Remaining arguments depend on the args given, in the order given
         for (argsInfo.fields, 0..) |field, i| {
-            acc[i + 2] = .{
-                .type = field.type,
-                .is_generic = false,
-                .is_noalias = false,
-            };
+            types[i + 2] = field.type;
+            attrs[i + 2] = .{ .@"noalias" = false };
         }
 
-        break :params &acc;
+        break :params .{ &types, &attrs };
     };
 
-    return @Type(.{
-        .@"fn" = .{
-            .calling_convention = .c,
-            .is_generic = false,
-            .is_var_args = false,
-            .return_type = Return,
-            .params = params,
-        },
-    });
+    return @Fn(types, attrs, Return, .{ .@"callconv" = .c });
 }
 
 test {
