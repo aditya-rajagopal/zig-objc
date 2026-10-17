@@ -36,8 +36,11 @@ pub fn MsgSend(comptime T: type) type {
             // Build our function type and call it
             const Fn = MsgSendFn(RealReturn, @TypeOf(target.value), @TypeOf(args));
             const msg_send_fn = comptime msgSendPtr(RealReturn, false);
-            const msg_send_ptr: *const Fn = @ptrCast(msg_send_fn);
-            const result = @call(.auto, msg_send_ptr, .{ target.value, sel.value } ++ args);
+            const msg_send_ptr: *const Fn = @ptrCast(@alignCast(msg_send_fn));
+
+            // Unwrap any Object types in args to their underlying c.id
+            const unwrapped_args = buildUnwrappedArgs(args);
+            const result = @call(.auto, msg_send_ptr, .{ target.value, sel.value } ++ unwrapped_args);
 
             if (!is_object) return result;
             return .{ .value = result };
@@ -62,12 +65,22 @@ pub fn MsgSend(comptime T: type) type {
 
             const Fn = MsgSendFn(RealReturn, *c.objc_super, @TypeOf(args));
             const msg_send_fn = comptime msgSendPtr(RealReturn, true);
-            const msg_send_ptr: *const Fn = @ptrCast(msg_send_fn);
-            var super: c.objc_super = .{
-                .receiver = target.value,
-                .super_class = superclass.value,
-            };
-            const result = @call(.auto, msg_send_ptr, .{ &super, sel.value } ++ args);
+            const msg_send_ptr: *const Fn = @ptrCast(@alignCast(msg_send_fn));
+            var super: c.objc_super =
+                if (comptime @hasField(c.objc_super, "super_class"))
+                    .{
+                        .receiver = target.value,
+                        .super_class = superclass.value,
+                    }
+                else
+                    .{
+                        .receiver = target.value,
+                        .class = superclass.value,
+                    };
+
+            // Unwrap any Object types in args to their underlying c.id
+            const unwrapped_args = buildUnwrappedArgs(args);
+            const result = @call(.auto, msg_send_ptr, .{ &super, sel.value } ++ unwrapped_args);
 
             if (!is_object) return result;
             return .{ .value = result };
@@ -181,28 +194,76 @@ fn MsgSendFn(
     // are an "id" so we just make sure the sizes match for ABI reasons.
     assert(@sizeOf(Target) == @sizeOf(c.id));
 
-    // Build up our argument types.
-    const Fn = std.builtin.Type.Fn;
-    const types: []const type, const attrs: *const [argsInfo.fields.len + 2]Fn.Param.Attributes = params: {
-        var types: [argsInfo.fields.len + 2]type = undefined;
-        var attrs: [argsInfo.fields.len + 2]Fn.Param.Attributes = undefined;
+    // Build up our argument types for @Fn
+    var param_types: [argsInfo.field_types.len + 2]type = undefined;
+    param_types[0] = Target;
+    param_types[1] = c.SEL;
+    for (argsInfo.field_types, 0..) |field_type, i| param_types[i + 2] = unwrapType(field_type);
 
-        types[0] = Target;
-        attrs[0] = .{ .@"noalias" = false };
+    return @Fn(&param_types, &@splat(.{}), Return, .{ .@"callconv" = .c });
+}
 
-        types[1] = c.SEL;
-        attrs[1] = .{ .@"noalias" = false };
+fn UnwrappedArgs(comptime Args: type) type {
+    const field_types = @typeInfo(Args).@"struct".field_types;
+    var types: [field_types.len]type = undefined;
+    for (field_types, 0..) |field_type, i| types[i] = unwrapType(field_type);
+    return @Tuple(&types);
+}
 
-        // Remaining arguments depend on the args given, in the order given
-        for (argsInfo.fields, 0..) |field, i| {
-            types[i + 2] = field.type;
-            attrs[i + 2] = .{ .@"noalias" = false };
+/// Maps objc wrapper types to their underlying C types for use in @Fn signatures,
+/// and validates that all other types are C-ABI compatible.
+fn unwrapType(comptime T: type) type {
+    // Unwrap our objc.Object type
+    if (T == objc.Object) return c.id;
+
+    // Unwrap any other objc wrapper (Class, Sel, etc.) — identified by having
+    // a single 'value' field of pointer size. Return the actual field type
+    // rather than c.id, since Class and Sel have distinct pointer types.
+    if (@typeInfo(T) == .@"struct") {
+        const info = @typeInfo(T).@"struct";
+        for (info.field_names, info.field_types) |field_name, field_type| {
+            if (std.mem.eql(u8, field_name, "value") and @sizeOf(field_type) == @sizeOf(c.id)) {
+                return field_type;
+            }
         }
+    }
 
-        break :params .{ &types, &attrs };
-    };
+    // Validate that the remaining type is safe to pass over the C ABI.
+    // Previously (pre-0.16), passing a non-C-compatible type like []const u8
+    // would silently compile but segfault at runtime via objc_msgSend.
+    // These checks turn that into a compile error.
+    switch (@typeInfo(T)) {
+        .int, .float, .bool, .void => {},
+        .@"enum" => {},
+        .pointer => {},
+        .optional => |opt| {
+            if (@typeInfo(opt.child) != .pointer)
+                @compileError("msgSend: " ++ @typeName(T) ++ " — optional must wrap a pointer");
+        },
+        .@"struct" => |s| {
+            if (s.layout != .@"extern" and s.layout != .@"packed")
+                @compileError("msgSend: " ++ @typeName(T) ++ " — struct must be extern or packed");
+        },
+        .@"union" => |u| {
+            if (u.layout != .@"extern")
+                @compileError("msgSend: " ++ @typeName(T) ++ " — union must be extern");
+        },
+        else => @compileError("msgSend: " ++ @typeName(T) ++ " — not C-ABI compatible"),
+    }
 
-    return @Fn(types, attrs, Return, .{ .@"callconv" = .c });
+    return T;
+}
+
+inline fn buildUnwrappedArgs(args: anytype) UnwrappedArgs(@TypeOf(args)) {
+    const field_types = @typeInfo(@TypeOf(args)).@"struct".field_types;
+    var result: UnwrappedArgs(@TypeOf(args)) = undefined;
+    inline for (field_types, 0..) |_, i| {
+        result[i] = if (unwrapType(@TypeOf(args[i])) != @TypeOf(args[i]))
+            args[i].value
+        else
+            args[i];
+    }
+    return result;
 }
 
 test {

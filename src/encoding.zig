@@ -10,9 +10,7 @@ fn comptimeN(comptime T: type) usize {
         const encoding = objc.Encoding.init(T);
 
         // Figure out how much space we need
-        var stream: std.Io.Writer.Discarding = .init(&.{});
-        stream.writer.print("{f}", .{encoding}) catch unreachable;
-        return stream.count;
+        return std.fmt.count("{f}", .{encoding});
     }
 }
 
@@ -23,11 +21,10 @@ pub fn comptimeEncode(comptime T: type) [comptimeN(T):0]u8 {
 
         // Build our final signature
         var buf: [comptimeN(T) + 1]u8 = undefined;
-        var fbs: std.Io.Writer = .fixed(buf[0 .. buf.len - 1]);
-        fbs.print("{f}", .{encoding}) catch unreachable;
-        buf[buf.len - 1] = 0;
+        const result = std.fmt.bufPrint(buf[0 .. buf.len - 1], "{f}", .{encoding}) catch unreachable;
+        buf[result.len] = 0;
 
-        return buf[0 .. buf.len - 1 :0].*;
+        return buf[0..result.len :0].*;
     }
 }
 
@@ -107,7 +104,7 @@ pub const Encoding = union(enum) {
 
     pub fn format(
         comptime self: Encoding,
-        writer: *std.Io.Writer,
+        writer: anytype,
     ) !void {
         switch (self) {
             .char => try writer.writeAll("c"),
@@ -148,8 +145,8 @@ pub const Encoding = union(enum) {
                 // of the struct (determined by levels of pointer indirection)
                 if (s.show_type_spec) {
                     try writer.writeAll("=");
-                    inline for (struct_info.@"struct".fields) |field| {
-                        const field_encode = init(field.type);
+                    inline for (struct_info.@"struct".field_types) |field_type| {
+                        const field_encode = init(field_type);
                         try field_encode.format(writer);
                     }
                 }
@@ -170,8 +167,8 @@ pub const Encoding = union(enum) {
                 // of the Union (determined by levels of pointer indirection)
                 if (u.show_type_spec) {
                     try writer.writeAll("=");
-                    inline for (union_info.@"union".fields) |field| {
-                        const field_encode = init(field.type);
+                    inline for (union_info.@"union".field_types) |field_type| {
+                        const field_encode = init(field_type);
                         try field_encode.format(writer);
                     }
                 }
@@ -213,13 +210,13 @@ pub const Encoding = union(enum) {
                 }
             },
             .function => |fn_info| {
-                assert(std.meta.eql(fn_info.calling_convention, std.builtin.CallingConvention.c));
+                assert(std.meta.eql(fn_info.attrs.@"callconv", std.builtin.CallingConvention.c));
 
                 // Return type is first in a method encoding
                 const ret_type_enc = init(fn_info.return_type.?);
                 try ret_type_enc.format(writer);
-                inline for (fn_info.params) |param| {
-                    const param_enc = init(param.type.?);
+                inline for (fn_info.param_types) |param_type| {
+                    const param_enc = init(param_type.?);
                     try param_enc.format(writer);
                 }
             },
@@ -320,7 +317,7 @@ test "?*u8 to Encoding.pointer encoding" {
 }
 
 test "Enum(c_uint) to Encoding.uint encoding" {
-    const TestEnum = enum(c_uint) {};
+    const TestEnum = enum(c_uint) { _ };
     try encodingMatchesType(TestEnum, "I");
 }
 
